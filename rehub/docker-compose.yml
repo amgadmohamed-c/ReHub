@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rehub
+      POSTGRES_PASSWORD: rehub_secret
+      POSTGRES_DB: rehub
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rehub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  # ── FastAPI backend ─────────────────────────────────────────────────────
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rehub:rehub_secret@db:5432/rehub
+      DEBUG: "false"
+      WINDOW_SIZE: "50"
+      WINDOW_STEP: "10"
+      FATIGUE_THRESHOLD: "0.65"
+      STRAIN_THRESHOLD: "0.60"
+      INJURY_THRESHOLD: "0.55"
+      OVEREXERTION_THRESHOLD: "0.70"
+      TEMP_HIGH_THRESHOLD: "38.5"
+    volumes:
+      # Persist trained models across restarts
+      - ./app/ml/models:/app/app/ml/models
+    ports:
+      - "8000:8000"
+
+  # ── ML trainer (one-shot container) ─────────────────────────────────────
+  trainer:
+    build: .
+    profiles: ["train"]        # only runs with: docker compose --profile train up trainer
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rehub:rehub_secret@db:5432/rehub
+    volumes:
+      - ./app/ml/models:/app/app/ml/models
+      - ./ml_training:/app/ml_training
+    command: ["python", "ml_training/train_models.py"]
+
+volumes:
+  pg_data:
