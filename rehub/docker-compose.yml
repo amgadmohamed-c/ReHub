@@ -1,8 +1,5 @@
-version: "3.9"
-
 services:
 
-  # ── PostgreSQL ──────────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -18,9 +15,8 @@ services:
       timeout: 5s
       retries: 5
     ports:
-      - "5432:5432"
+      - "5433:5432"
 
-  # ── FastAPI backend ─────────────────────────────────────────────────────
   api:
     build: .
     restart: unless-stopped
@@ -38,15 +34,13 @@ services:
       OVEREXERTION_THRESHOLD: "0.70"
       TEMP_HIGH_THRESHOLD: "38.5"
     volumes:
-      # Persist trained models across restarts
       - ./app/ml/models:/app/app/ml/models
     ports:
       - "8000:8000"
 
-  # ── ML trainer (one-shot container) ─────────────────────────────────────
   trainer:
     build: .
-    profiles: ["train"]        # only runs with: docker compose --profile train up trainer
+    profiles: ["train"]
     depends_on:
       db:
         condition: service_healthy
