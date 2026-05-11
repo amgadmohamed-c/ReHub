@@ -1,18 +1,9 @@
 """
 ML model loader and inference interface.
-
-Two pipelines:
-  1. ExerciseClassifier  – Random Forest trained on accel/gyro features
-  2. InjuryPredictor     – Gradient Boosting trained on EMG/flex/flow/temp/intensity
-
-Both are loaded once at startup and reused across requests.
-If trained models are absent, lightweight stub models are used so the
-service can run without pre-trained weights (for development/demo).
 """
 
 from __future__ import annotations
 
-import os
 import pickle
 from pathlib import Path
 from typing import Tuple
@@ -24,7 +15,6 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Exercise label mapping (must match training)
 EXERCISE_LABELS = [
     "walking", "running", "push_up", "sit_up", "standing", "resting"
 ]
@@ -33,28 +23,20 @@ MODEL_DIR = Path(settings.MODEL_DIR)
 
 
 # ---------------------------------------------------------------------------
-# Stub models (used when real .pkl files are absent)
+# Stub models
 # ---------------------------------------------------------------------------
 
 class _StubExerciseClassifier:
-    """Rule-based heuristic fallback for exercise classification."""
+    classes_ = np.array(EXERCISE_LABELS)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        # X shape: (n_samples, 36)
-        # Feature index 30 = intensity_mean  (see features.py)
         intensity_mean = X[:, 30]
         labels = []
         for i in intensity_mean:
-            if i < 1.5:
-                labels.append("resting")
-            elif i < 3.0:
-                labels.append("standing")
-            elif i < 6.0:
-                labels.append("walking")
-            elif i < 10.0:
-                labels.append("running")
-            else:
-                labels.append("running")
+            if i < 1.5:   labels.append("resting")
+            elif i < 3.0: labels.append("standing")
+            elif i < 6.0: labels.append("walking")
+            else:          labels.append("running")
         return np.array(labels)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -62,9 +44,8 @@ class _StubExerciseClassifier:
         proba = []
         for label in preds:
             row = [0.05] * len(EXERCISE_LABELS)
-            idx = EXERCISE_LABELS.index(label)
+            idx = list(self.classes_).index(label)
             row[idx] = 0.70
-            # distribute remainder
             remainder = 0.30 / (len(EXERCISE_LABELS) - 1)
             for j in range(len(EXERCISE_LABELS)):
                 if j != idx:
@@ -74,21 +55,15 @@ class _StubExerciseClassifier:
 
 
 class _StubInjuryPredictor:
-    """Rule-based heuristic fallback for injury/fatigue prediction."""
-
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        # Returns shape (n_samples, 4): [fatigue, strain, injury, overexertion]
         results = []
         for row in X:
-            emg_mean = row[0]       # feature index 0
-            intensity_mean = row[20] # feature index 20
-            temp_mean = row[15]      # feature index 15
-
-            fatigue = min(emg_mean / 400.0, 1.0)
-            strain = min(intensity_mean / 15.0, 1.0)
-            injury = min((emg_mean / 500.0 + intensity_mean / 20.0) / 2, 1.0)
+            emg_mean       = row[0]
+            intensity_mean = row[20]
+            fatigue      = min(emg_mean / 400.0, 1.0)
+            strain       = min(intensity_mean / 15.0, 1.0)
+            injury       = min((emg_mean / 500.0 + intensity_mean / 20.0) / 2, 1.0)
             overexertion = min(intensity_mean / 12.0, 1.0)
-
             results.append([fatigue, strain, injury, overexertion])
         return np.clip(np.array(results), 0.0, 1.0)
 
@@ -99,7 +74,7 @@ class _StubInjuryPredictor:
 
 class ModelRegistry:
     _exercise_clf = None
-    _injury_pred = None
+    _injury_pred  = None
     _loaded = False
 
     @classmethod
@@ -123,11 +98,7 @@ class ModelRegistry:
                 model = pickle.load(f)
             logger.info("Loaded %s from %s", name, path)
             return model
-        logger.warning(
-            "%s model not found at %s — using stub heuristics. "
-            "Run ml_training/train_models.py to generate real models.",
-            name, path,
-        )
+        logger.warning("%s not found at %s — using stub.", name, path)
         return stub
 
     @classmethod
@@ -139,46 +110,37 @@ class ModelRegistry:
     # ------------------------------------------------------------------
 
     @classmethod
-    def classify_exercise(
-        cls, features: np.ndarray
-    ) -> Tuple[str, float]:
-        """
-        Returns (exercise_label, confidence).
-        features shape: (36,) — will be reshaped to (1, 36).
-        """
+    def classify_exercise(cls, features: np.ndarray) -> Tuple[str, float]:
         X = features.reshape(1, -1)
-        label = cls._exercise_clf.predict(X)[0]
+        label = str(cls._exercise_clf.predict(X)[0])
         proba = cls._exercise_clf.predict_proba(X)[0]
-        idx = EXERCISE_LABELS.index(label) if label in EXERCISE_LABELS else 0
+
+        # Use the model's own classes_ order — NOT the hardcoded list
+        # This is what caused confidence = 0 before
+        classes = list(cls._exercise_clf.classes_)
+        idx = classes.index(label) if label in classes else 0
         confidence = float(proba[idx])
-        return str(label), confidence
+
+        return label, confidence
 
     @classmethod
-    def predict_injury(
-        cls, features: np.ndarray
-    ) -> dict:
-        """
-        Returns dict with fatigue, strain_risk, injury_risk, overexertion.
-        features shape: (30,) — will be reshaped to (1, 30).
-        """
+    def predict_injury(cls, features: np.ndarray) -> dict:
         X = features.reshape(1, -1)
         proba = cls._injury_pred.predict_proba(X)[0]
-        # proba shape: (4,) → [fatigue, strain, injury, overexertion]
         return {
-            "fatigue_score": float(proba[0]),
-            "strain_risk": float(proba[1]),
-            "injury_risk": float(proba[2]),
+            "fatigue_score":    float(proba[0]),
+            "strain_risk":      float(proba[1]),
+            "injury_risk":      float(proba[2]),
             "overexertion_score": float(proba[3]),
         }
 
 
 # ---------------------------------------------------------------------------
-# Picklable wrapper used by the training script
-# (must be importable from this module so unpickling works)
+# Picklable wrapper — must stay in this module for unpickling to work
 # ---------------------------------------------------------------------------
 
 class WrappedInjuryPredictor:
-    """Wraps scikit-learn MultiOutputClassifier → single predict_proba matrix."""
+    """Wraps MultiOutputClassifier → single (n_samples, 4) predict_proba."""
     def __init__(self, model):
         self._m = model
 
