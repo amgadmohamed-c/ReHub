@@ -19,6 +19,7 @@ from app.routes import (
     health_routes,
     sensor_routes,
     ws_routes,
+    simulate_routes,
 )
 
 setup_logging()
@@ -93,6 +94,7 @@ app.include_router(sensor_routes.router, prefix="/api/v1")
 app.include_router(analysis_routes.router, prefix="/api/v1")
 app.include_router(alert_routes.router, prefix="/api/v1")
 app.include_router(ws_routes.router)
+app.include_router(simulate_routes.router, prefix="/api/v1")
 
 
 # ---------------------------------------------------------------------------
